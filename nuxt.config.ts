@@ -45,6 +45,7 @@ export default defineNuxtConfig({
     ssoSharedSecret: '',
     a2aEnabled: false,
     a2aWriteEnabled: false,
+    a2aStudyTrackEnabled: false,
     a2aSharedSecret: '',
     a2aAllowedIssuer: 'team-management',
     a2aCallersJson: '',

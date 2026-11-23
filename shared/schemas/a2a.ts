@@ -105,6 +105,7 @@ export const A2aAgentCardSchema = z.strictObject({
   capabilities: z.strictObject({
     streaming: z.literal(false),
     pushNotifications: z.literal(false),
+    extensions: z.array(z.strictObject({ uri: z.string() })).optional(),
   }),
   skills: z.array(
     z.strictObject({

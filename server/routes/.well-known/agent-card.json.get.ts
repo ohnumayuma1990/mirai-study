@@ -1,10 +1,12 @@
 import { defineEventHandler, setResponseHeader } from 'h3'
 import {
   A2A_AGENT_ID,
+  A2A_EXTENSION_HITL_FORM,
   A2A_PROTOCOL_VERSION,
   A2aAgentCardSchema,
   type A2aAgentCard,
 } from '../../../shared/schemas/a2a'
+import { A2A_EXTENSION_STUDY_TRACK, A2A_STUDY_TRACK_SKILL } from '../../../shared/schemas/study-track-goal'
 import { requireA2aCaller } from '../../utils/a2a-auth'
 import { a2aRateLimiter } from '../../utils/rate-limit'
 import { getClientIp } from '../../utils/request-ip'
@@ -14,6 +16,7 @@ import { validateStrictOrigin } from '../../utils/sso'
 export function buildSignedAgentCard(params: {
   appPublicOrigin: string
   signingSecret: string
+  studyTrackGoals?: boolean
 }): { card: A2aAgentCard; rawBody: string; signature: string } {
   const origin = validateStrictOrigin(params.appPublicOrigin, 'NUXT_APP_PUBLIC_ORIGIN')
 
@@ -32,6 +35,7 @@ export function buildSignedAgentCard(params: {
     capabilities: {
       streaming: false,
       pushNotifications: false,
+      ...(params.studyTrackGoals ? { extensions: [{ uri: A2A_EXTENSION_STUDY_TRACK }, { uri: A2A_EXTENSION_HITL_FORM }] } : {}),
     },
     skills: [
       {
@@ -39,6 +43,11 @@ export function buildSignedAgentCard(params: {
         name: '学習サマリー照会',
         description: '学習トラック・直近の学習実績・3シナリオ未来予測・要復習件数のサマリーを同期で取得',
       },
+      ...(params.studyTrackGoals ? [{
+        id: A2A_STUDY_TRACK_SKILL,
+        name: '学習目標の新規作成・変更',
+        description: '対話で学習トラックの目標を作成し、本人の確認後に保存',
+      }] : []),
     ],
   })
 
@@ -60,6 +69,7 @@ export default defineEventHandler((event) => {
   const { rawBody, signature } = buildSignedAgentCard({
     appPublicOrigin: String(config.appPublicOrigin ?? ''),
     signingSecret: caller.callerSecret,
+    studyTrackGoals: config.a2aStudyTrackEnabled === true && Boolean(String(config.openaiApiKey ?? '').trim()),
   })
 
   setResponseHeader(event, 'Content-Type', 'application/json; charset=utf-8')
