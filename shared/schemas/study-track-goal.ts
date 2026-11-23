@@ -27,6 +27,16 @@ export const StudyTrackGoalConfirmSchema = z.strictObject({
 })
 export type StudyTrackGoalEdits = z.infer<typeof StudyTrackGoalConfirmSchema>['editedFields']
 
+export const StudyTrackGoalFieldKeySchema = z.enum([
+  'category',
+  'targetDate',
+  'dailyGoalMinutes',
+  'targetTotalHours',
+  'targetScorePct',
+  'passingScorePct',
+])
+export type StudyTrackGoalFieldKey = z.infer<typeof StudyTrackGoalFieldKeySchema>
+
 export const StudyTrackGoalInterpretationSchema = z.strictObject({
   intent: z.enum(['create', 'update', 'clarify', 'summary', 'cancel']),
   trackNumber: z.number().int().nullable(),
@@ -39,4 +49,5 @@ export const StudyTrackGoalInterpretationSchema = z.strictObject({
   passingScorePct: z.number().nullable(),
   scheduleNote: z.string().nullable(),
   question: z.string().nullable(),
+  assumedFields: z.array(StudyTrackGoalFieldKeySchema),
 })

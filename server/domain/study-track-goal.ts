@@ -80,10 +80,11 @@ function formatChanges(previous: StudyTrack, input: StudyTrackInput) {
 export async function prepareStudyTrackGoal(uid: string, turn: StudyTrackGoalTurn, text: string) {
   const tracks = await listStudyTracks(uid)
   const config = useRuntimeConfig()
+  const todayStr = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', dateStyle: 'short' }).format(new Date())
   const interpreted = await interpretStudyTrackGoal({
     apiKey: String(config.openaiApiKey ?? ''),
     model: String(config.openaiModel ?? ''),
-    today: new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', dateStyle: 'short' }).format(new Date()),
+    today: todayStr,
     text,
     history: turn.studyTrackGoal === 'continue' ? turn.history : [],
     trackTitles: tracks.map(track => track.title),
@@ -101,9 +102,100 @@ export async function prepareStudyTrackGoal(uid: string, turn: StudyTrackGoalTur
     return ask(`変更したい学習トラックを番号か名前で教えてください。\n\n${choices}`)
   }
 
+  const keys = Object.keys(GOAL_LABELS) as (keyof typeof GOAL_LABELS)[]
+
+  if (interpreted.intent === 'create') {
+    // Required fields for create: title and targetDate
+    const missing: (keyof typeof GOAL_LABELS)[] = []
+    if (!interpreted.title || !GoalTrackSchema.shape.title.safeParse(interpreted.title).success) {
+      missing.push('title')
+    }
+    if (!interpreted.targetDate || !GoalTrackSchema.shape.targetDate.safeParse(interpreted.targetDate).success) {
+      missing.push('targetDate')
+    }
+    if (missing.length) {
+      return ask(`学習目標の登録に必要な項目（学習テーマと試験日・目標日）を教えてください。\n\n${missing.map(key => `- ${GOAL_LABELS[key]}`).join('\n')}`)
+    }
+
+    const assumedKeysSet = new Set<keyof typeof GOAL_LABELS>(interpreted.assumedFields ?? [])
+
+    // Resolve optional 5 fields with LLM values or deterministic fallback
+    const resolvedValues: Record<string, unknown> = {
+      title: interpreted.title,
+      targetDate: interpreted.targetDate,
+    }
+
+    const defaults: Record<string, unknown> = {
+      category: 'general',
+      passingScorePct: 70,
+      targetScorePct: 80,
+      targetTotalHours: 60,
+    }
+
+    for (const key of ['category', 'passingScorePct', 'targetScorePct', 'targetTotalHours'] as const) {
+      const val = interpreted[key]
+      if (val !== null && GoalTrackSchema.shape[key].safeParse(val).success) {
+        resolvedValues[key] = val
+      } else {
+        resolvedValues[key] = defaults[key]
+        assumedKeysSet.add(key)
+      }
+    }
+
+    // dailyGoalMinutes calculation
+    const targetTotalHoursNum = Number(resolvedValues.targetTotalHours) || 60
+    const targetDateStr = String(resolvedValues.targetDate)
+    const diffDays = Math.round((new Date(targetDateStr).getTime() - new Date(todayStr).getTime()) / (1000 * 60 * 60 * 24))
+    const remainingDays = Math.max(1, diffDays)
+    const calculatedDailyMinutes = Math.min(720, Math.max(10, Math.round(((targetTotalHoursNum * 60) / remainingDays) / 5) * 5))
+
+    const dailyVal = interpreted.dailyGoalMinutes
+    const scheduleNote = interpreted.scheduleNote?.trim().slice(0, 240)
+
+    if (dailyVal !== null && GoalTrackSchema.shape.dailyGoalMinutes.safeParse(dailyVal).success) {
+      resolvedValues.dailyGoalMinutes = dailyVal
+    } else {
+      resolvedValues.dailyGoalMinutes = calculatedDailyMinutes
+      assumedKeysSet.add('dailyGoalMinutes')
+    }
+
+    const values = Object.fromEntries(keys.map(key => [key, resolvedValues[key]]))
+    const id = randomUUID()
+    const input = GoalTrackSchema.parse({ ...values, id: `track-${id}`, isDefault: false })
+
+    const assumedLabels = Array.from(assumedKeysSet).map(key => GOAL_LABELS[key])
+    const summaryParts: string[] = []
+    if (assumedLabels.length > 0) {
+      summaryParts.push(`AIが目安値を自動入力しました（${assumedLabels.join('・')}）。内容を確認し、必要なら調整して登録してください。`)
+    }
+    if (scheduleNote) {
+      summaryParts.push(`学習ペースの希望: ${scheduleNote}`)
+    }
+    const summary = summaryParts.join('\n')
+
+    const task: GoalTask = { state: 'TASK_STATE_INPUT_REQUIRED', expiresAt: Date.now() + TASK_LIFETIME_MS, input, previous: null }
+    await taskRef(uid, id).create(task)
+
+    const payload = {
+      agentId: A2A_AGENT_ID,
+      taskId: id,
+      title: '学習トラックの新規作成',
+      confirmLabel: '学習目標を登録',
+      ...(summary ? { summary } : {}),
+      fields: editableFields(input),
+    }
+    return {
+      task: {
+        id,
+        contextId: id,
+        status: { state: task.state, message: agentMessage('登録内容を確認し、必要なら修正して確定してください。', id, id, { extension: A2A_EXTENSION_HITL_FORM, payload }) },
+      },
+    }
+  }
+
+  // update intent
   const { title, category, targetDate, dailyGoalMinutes, targetTotalHours, targetScorePct, passingScorePct } = interpreted
   const proposed = { title, category, targetDate, dailyGoalMinutes, targetTotalHours, targetScorePct, passingScorePct }
-  const keys = Object.keys(GOAL_LABELS) as (keyof typeof GOAL_LABELS)[]
   const values = Object.fromEntries(keys.map(key => [key, proposed[key] ?? previous?.[key] ?? null]))
   const missing = keys.filter(key => !GoalTrackSchema.shape[key].safeParse(values[key]).success)
   const scheduleNote = interpreted.scheduleNote?.trim().slice(0, 240)
@@ -128,8 +220,8 @@ export async function prepareStudyTrackGoal(uid: string, turn: StudyTrackGoalTur
   const payload = {
     agentId: A2A_AGENT_ID,
     taskId: id,
-    title: previous ? '学習トラックの目標変更' : '学習トラックの新規作成',
-    confirmLabel: previous ? '変更を保存' : '学習目標を登録',
+    title: '学習トラックの目標変更',
+    confirmLabel: '変更を保存',
     ...(summary ? { summary } : {}),
     fields: editableFields(input),
   }
