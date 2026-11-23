@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { A2A_AUDIENCE } from '../shared/schemas/a2a'
+import { A2A_AUDIENCE, A2A_EXTENSION_HITL_FORM } from '../shared/schemas/a2a'
+import { A2A_EXTENSION_STUDY_TRACK, A2A_STUDY_TRACK_SKILL, StudyTrackGoalConfirmSchema } from '../shared/schemas/study-track-goal'
 import { signHmacToken, verifyAgentSignature } from '../server/utils/signed-token'
 import { parseA2aCallers, verifyA2aAuthorization } from '../server/utils/a2a-auth'
 import { buildSignedAgentCard } from '../server/routes/.well-known/agent-card.json.get'
@@ -11,6 +12,18 @@ const SSO_SECRET = 'sso-independent-secret--0123456789abcdef'
 const OWNER_EMAIL = 'owner@example.com'
 const OWNER_UID = 'uid-study-owner-99'
 const MAPPINGS_JSON = JSON.stringify([{ email: OWNER_EMAIL, uid: OWNER_UID }])
+
+it('advertises study goals only when enabled and disallows changing the confirmation target', () => {
+  const settings = { appPublicOrigin: 'https://study.example.com', signingSecret: SECRET_A }
+  const readOnly = buildSignedAgentCard(settings).card
+  expect(readOnly.capabilities.extensions).toBeUndefined()
+  expect(readOnly.skills.map(skill => skill.id)).toEqual(['study_summary'])
+  const goal = buildSignedAgentCard({ ...settings, studyTrackGoals: true })
+  expect(goal.card.capabilities.extensions?.map(extension => extension.uri)).toEqual([A2A_EXTENSION_STUDY_TRACK, A2A_EXTENSION_HITL_FORM])
+  expect(goal.card.skills.map(skill => skill.id)).toContain(A2A_STUDY_TRACK_SKILL)
+  expect(StudyTrackGoalConfirmSchema.safeParse({ editedFields: { dailyGoalMinutes: 40 } }).success).toBe(true)
+  expect(StudyTrackGoalConfirmSchema.safeParse({ editedFields: { id: 'other-track' } }).success).toBe(false)
+})
 
 describe('server/utils/a2a-auth & Agent Card', () => {
   it('supports single-caller secret and multi-caller JSON registry', () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { createError, defineEventHandler, setResponseHeader } from 'h3'
+import { createError, defineEventHandler, getHeader, setResponseHeader } from 'h3'
 import {
   A2A_AGENT_ID,
   A2A_EXTENSION_HITL_FORM,
@@ -10,6 +10,12 @@ import {
   A2aSendMessageParamsSchema,
   type A2aRecordKind,
 } from '../../../shared/schemas/a2a'
+import {
+  A2A_EXTENSION_STUDY_TRACK,
+  StudyTrackGoalConfirmSchema,
+  StudyTrackGoalTaskIdSchema,
+  StudyTrackGoalTurnSchema,
+} from '../../../shared/schemas/study-track-goal'
 import { VisionIngestTypeSchema, type VisionIngestType } from '../../../shared/schemas/vision'
 import { todayIsoUtc } from '../../../shared/domain/simulation'
 import { assertA2aWriteAllowed, requireA2aCaller } from '../../utils/a2a-auth'
@@ -34,6 +40,7 @@ import {
   createA2aDraftTask,
   getA2aDraftTask,
 } from '../../domain/record-task'
+import { prepareStudyTrackGoal, resolveStudyTrackGoal } from '../../domain/study-track-goal'
 
 function inferRecordKindFromText(text: string): A2aRecordKind {
   const lower = text.toLowerCase()
@@ -136,6 +143,15 @@ export default defineEventHandler(async (event) => {
   a2aRateLimiter.assertAllowed(`a2a:uid:${uid}`)
 
   const rpc = await readAndValidateA2aBody(event)
+  const studyTrackExtension = getHeader(event, 'a2a-extensions')?.split(',').some(uri => uri.trim() === A2A_EXTENSION_STUDY_TRACK)
+
+  if (studyTrackExtension && rpc.method === 'CancelTask') {
+    assertA2aWriteAllowed(caller, useRuntimeConfig().a2aStudyTrackEnabled === true)
+    const taskId = StudyTrackGoalTaskIdSchema.safeParse(rpc.params.id)
+    if (!taskId.success) throw createError({ statusCode: 400, statusMessage: 'Invalid study goal task ID.' })
+    const task = await resolveStudyTrackGoal(uid, taskId.data, null)
+    return { jsonrpc: '2.0', id: rpc.id, result: { task } }
+  }
 
   const isWriteMethod =
     rpc.method === 'CancelTask' ||
@@ -147,7 +163,7 @@ export default defineEventHandler(async (event) => {
     assertA2aWriteAllowed(caller, Boolean(config.a2aWriteEnabled))
   }
 
-  // A2A v1.0 synchronous SendMessage (read-only study summary)
+  // A2A v1.0 synchronous SendMessage.
   if (rpc.method === 'SendMessage') {
     const parsedParams = A2aSendMessageParamsSchema.safeParse(rpc.params)
     if (!parsedParams.success) {
@@ -155,6 +171,27 @@ export default defineEventHandler(async (event) => {
         statusCode: 400,
         statusMessage: 'Bad Request: Invalid A2A SendMessage params.',
       })
+    }
+
+    const { message, metadata } = parsedParams.data
+    if (studyTrackExtension || metadata?.studyTrackGoal !== undefined) {
+      assertA2aWriteAllowed(caller, useRuntimeConfig().a2aStudyTrackEnabled === true && Boolean(studyTrackExtension))
+      const [part] = message.parts
+      if (message.taskId) {
+        const taskId = StudyTrackGoalTaskIdSchema.safeParse(message.taskId)
+        const confirmation = StudyTrackGoalConfirmSchema.safeParse(part && 'data' in part ? part.data : null)
+        if (!taskId.success || !confirmation.success || message.parts.length !== 1) {
+          throw createError({ statusCode: 400, statusMessage: 'Invalid study goal confirmation.' })
+        }
+        const task = await resolveStudyTrackGoal(uid, taskId.data, confirmation.data.editedFields)
+        return { jsonrpc: '2.0', id: rpc.id, result: { task } }
+      }
+      const turn = StudyTrackGoalTurnSchema.safeParse(metadata)
+      if (!turn.success || message.parts.length !== 1 || !part || !('text' in part) || !part.text.trim() || part.text.length > 1000) {
+        throw createError({ statusCode: 400, statusMessage: 'Invalid study goal message.' })
+      }
+      const result = await prepareStudyTrackGoal(uid, turn.data, part.text.trim())
+      if (result) return { jsonrpc: '2.0', id: rpc.id, result }
     }
 
     const rawTrackId = parsedParams.data.metadata?.trackId

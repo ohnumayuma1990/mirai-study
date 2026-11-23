@@ -14,8 +14,8 @@ function userCollection(uid: string, name: string) {
   return getAdminFirestore().collection('users').doc(uid).collection(name)
 }
 
-export async function listStudyTracks(uid: string): Promise<StudyTrack[]> {
-  const snap = await userCollection(uid, 'tracks')
+function studyTracksQuery(uid: string) {
+  return userCollection(uid, 'tracks')
     .orderBy('createdAt', 'asc')
     .limit(MAX_STUDY_TRACKS)
     .select(
@@ -30,8 +30,9 @@ export async function listStudyTracks(uid: string): Promise<StudyTrack[]> {
       'createdAt',
       'updatedAt',
     )
-    .get()
+}
 
+function mapStudyTracks(snap: FirebaseFirestore.QuerySnapshot): StudyTrack[] {
   return snap.docs.map((doc) => {
     const data = doc.data()
     return {
@@ -50,13 +51,29 @@ export async function listStudyTracks(uid: string): Promise<StudyTrack[]> {
   })
 }
 
-export async function upsertStudyTrack(uid: string, input: StudyTrackInput): Promise<StudyTrack> {
+export async function listStudyTracks(uid: string): Promise<StudyTrack[]> {
+  return mapStudyTracks(await studyTracksQuery(uid).get())
+}
+
+export async function writeStudyTrack(
+  transaction: FirebaseFirestore.Transaction,
+  uid: string,
+  input: StudyTrackInput,
+  expectedTrack?: StudyTrack | null,
+): Promise<StudyTrack> {
   const col = userCollection(uid, 'tracks')
-  const existing = await listStudyTracks(uid)
+  const existing = mapStudyTracks(await transaction.get(studyTracksQuery(uid)))
   const nowIso = new Date().toISOString()
 
   const trackId = input.id ?? `track-${randomUUID().slice(0, 8)}`
   const existingTrack = existing.find((t) => t.id === trackId)
+  if (expectedTrack !== undefined && (
+    expectedTrack === null ? Boolean(existingTrack)
+      : !existingTrack || Object.keys(existingTrack).some(key =>
+        existingTrack[key as keyof StudyTrack] !== expectedTrack[key as keyof StudyTrack])
+  )) {
+    throw createError({ statusCode: 409, statusMessage: 'Conflict: Study track has changed.' })
+  }
 
   if (!existingTrack && existing.length >= MAX_STUDY_TRACKS) {
     throw createError({
@@ -66,13 +83,11 @@ export async function upsertStudyTrack(uid: string, input: StudyTrackInput): Pro
   }
 
   const shouldBeDefault = input.isDefault || existing.length === 0
-  const db = getAdminFirestore()
-  const batch = db.batch()
 
   if (shouldBeDefault) {
     for (const other of existing) {
       if (other.id !== trackId && other.isDefault) {
-        batch.update(col.doc(other.id), { isDefault: false, updatedAt: nowIso })
+        transaction.update(col.doc(other.id), { isDefault: false, updatedAt: nowIso })
       }
     }
   }
@@ -91,7 +106,7 @@ export async function upsertStudyTrack(uid: string, input: StudyTrackInput): Pro
     updatedAt: nowIso,
   }
 
-  batch.set(col.doc(trackId), {
+  transaction.set(col.doc(trackId), {
     title: record.title,
     category: record.category,
     targetDate: record.targetDate,
@@ -104,8 +119,11 @@ export async function upsertStudyTrack(uid: string, input: StudyTrackInput): Pro
     updatedAt: record.updatedAt,
   })
 
-  await batch.commit()
   return record
+}
+
+export async function upsertStudyTrack(uid: string, input: StudyTrackInput): Promise<StudyTrack> {
+  return getAdminFirestore().runTransaction(transaction => writeStudyTrack(transaction, uid, input))
 }
 
 export async function listStudySessions(
