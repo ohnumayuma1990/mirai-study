@@ -3,6 +3,9 @@
 資格試験・プログラミング技術習得＆3シナリオ未来予測・忘却曲線AIエージェントアプリ（Nuxt 3 フルスタック構成 / GCP 常時無料枠 + OpenAI Vision 最適化 / AI ROZA SSO・A2A v1.0 対応）
 
 ## ドキュメント
+
+- [現行実装の詳細設計書](./docs/detailed-design.md)
+- [設計とコードの読み方](./docs/code-reading-guide.md)
 - [要件定義書 & 実装計画 (`docs/implementation-plan.md`)](./docs/implementation-plan.md)
 
 ## 技術スタック
