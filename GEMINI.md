@@ -40,3 +40,9 @@
 ### 2.6 Verification Before Completion
 - コードの作成・編集完了後、完了報告を行う**前**に `test-verifier` サブエージェント（`verify-project` スキル）を実行し、変更スコープに応じた検証コマンド（typecheck / lint / test / build 等、対象リポジトリの定義に従う）が `PASS` することを確認する。
 - 実行していないコマンドを成功と偽らない。型エラーや lint 警告の安易な抑制（`@ts-ignore`, `eslint-disable` 等）は原則禁止とする。
+
+### 2.7 Model Tier Separation (Plan vs Implementation)
+- 調査・設計・実装計画の作成は親エージェント（UI選択モデル）で行う。
+- 計画承認後のコード実装・編集・テスト作成は、ユーザー方針に基づき `implementer` サブエージェントへ委譲し、呼び出し時は **`Model: "flash_lite"` を明示指定**する。
+- 実装完了後の検証は引き続き `test-verifier`（`flash`）で実施する。
+
