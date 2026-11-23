@@ -81,8 +81,13 @@ async function handleLogin(): Promise<void> {
       </button>
     </form>
 
-    <p v-if="config.public.ssoEnabled" class="mt-4 text-center text-xs text-slate-500">
-      AI ROZA Hub からの SSO ログインが有効です。
-    </p>
+    <div v-if="config.public.ssoEnabled" class="mt-5 border-t border-slate-200 pt-4 text-center">
+      <a
+        href="/api/auth/sso/start"
+        class="inline-flex w-full items-center justify-center rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-100"
+      >
+        AI ROZA Hub でログイン
+      </a>
+    </div>
   </div>
 </template>

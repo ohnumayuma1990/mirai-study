@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { createError, defineEventHandler } from 'h3'
+import { createError, defineEventHandler, setResponseHeader } from 'h3'
 import {
   A2A_AGENT_ID,
   A2A_EXTENSION_HITL_FORM,
@@ -7,11 +7,12 @@ import {
   A2A_EXTENSION_UI_CARDS,
   A2aMessagePartSchema,
   A2aQuickSheetTabSchema,
+  A2aSendMessageParamsSchema,
   type A2aRecordKind,
 } from '../../../shared/schemas/a2a'
 import { VisionIngestTypeSchema, type VisionIngestType } from '../../../shared/schemas/vision'
 import { todayIsoUtc } from '../../../shared/domain/simulation'
-import { requireA2aCaller } from '../../utils/a2a-auth'
+import { assertA2aWriteAllowed, requireA2aCaller } from '../../utils/a2a-auth'
 import { readAndValidateA2aBody } from '../../utils/a2a-body'
 import { getAdminStorageBucket } from '../../utils/firebase-admin'
 import { validateImageBuffer } from '../../utils/image-validation'
@@ -20,11 +21,13 @@ import { a2aRateLimiter } from '../../utils/rate-limit'
 import { getClientIp } from '../../utils/request-ip'
 import {
   getStudySimulationForUser,
+  getStudySummaryForUser,
   listDevLogs,
   listExamLogs,
   listReviewItems,
   listStudySessions,
   listStudyTracks,
+  type StudySummarySnapshot,
 } from '../../domain/miraistudy-service'
 import {
   cancelA2aDraftTask,
@@ -57,14 +60,111 @@ function inferIngestTypeFromText(text: string): VisionIngestType {
   return 'study_material_photo'
 }
 
+export function formatStudySummaryText(snapshot: StudySummarySnapshot): string {
+  if (!snapshot.selectedTrack || snapshot.simulation.status === 'needs_setup') {
+    const message =
+      snapshot.simulation.status === 'needs_setup'
+        ? snapshot.simulation.message
+        : '学習トラックがまだ登録されていません。'
+    return `【MiraiStudy 学習サマリー】\n${message}`
+  }
+
+  const sim = snapshot.simulation
+  const lines = [
+    `【MiraiStudy 学習サマリー: ${sim.trackTitle}】`,
+    `・目標日: ${sim.targetDate}（残り ${sim.daysRemaining} 日）`,
+    `・累計学習時間: ${sim.cumulativeStudyHours.toFixed(1)}h / 目標 ${sim.targetTotalHours}h（直近平均 ${Math.round(sim.observedDailyMinutesAvg)}分/日）`,
+    `・現在の推定得点率: ${sim.currentEstimatedScorePct.toFixed(1)}%（合格ライン ${sim.passingScorePct}% / 目標 ${sim.targetScorePct}%）`,
+    `・3シナリオ予測（目標日時点）: 実績ペース ${sim.scenarios.observed_trend.projectedScoreAtTargetDate.toFixed(1)}% / 目標ペース ${sim.scenarios.target_pace.projectedScoreAtTargetDate.toFixed(1)}% / 集中ペース ${sim.scenarios.intensive_pace.projectedScoreAtTargetDate.toFixed(1)}%`,
+    `・要復習カード: ${snapshot.dueReviewCount}件（有効カード ${snapshot.activeReviewCount}件）`,
+  ]
+
+  if (snapshot.recentSessions.length > 0) {
+    const latest = snapshot.recentSessions[0]!
+    lines.push(`・直近の学習記録: ${latest.studiedDate} ${latest.materialOrTopic}（${latest.durationMinutes}分）`)
+  }
+
+  return lines.join('\n')
+}
+
+export function buildSendMessageSummaryResponse(
+  rpcId: string | number,
+  snapshot: StudySummarySnapshot,
+) {
+  const summaryText = formatStudySummaryText(snapshot)
+  return {
+    jsonrpc: '2.0' as const,
+    id: rpcId,
+    result: {
+      message: {
+        role: 'ROLE_AGENT' as const,
+        messageId: randomUUID(),
+        contextId: randomUUID(),
+        parts: [
+          { text: summaryText },
+          {
+            data: {
+              agentId: A2A_AGENT_ID,
+              skill: 'study_summary',
+              tracksCount: snapshot.tracks.length,
+              selectedTrack: snapshot.selectedTrack,
+              simulation: snapshot.simulation,
+              recentSessions: snapshot.recentSessions,
+              recentExamLogs: snapshot.recentExamLogs,
+              dueReviewCount: snapshot.dueReviewCount,
+              activeReviewCount: snapshot.activeReviewCount,
+            },
+          },
+        ],
+      },
+    },
+  }
+}
+
 export default defineEventHandler(async (event) => {
-  const caller = requireA2aCaller(event)
+  setResponseHeader(event, 'Cache-Control', 'no-store')
+
   const ip = getClientIp(event)
-  a2aRateLimiter.assertAllowed(`a2a:uid:${caller.uid}`)
   a2aRateLimiter.assertAllowed(`a2a:ip:${ip}`)
 
+  // Authenticate caller and verify a2aEnabled BEFORE buffering/parsing request body (up to 6MB)
+  const caller = requireA2aCaller(event, {
+    requiredScope: 'read',
+    requireUser: true,
+  })
+  const uid = caller.uid!
+  a2aRateLimiter.assertAllowed(`a2a:uid:${uid}`)
+
   const rpc = await readAndValidateA2aBody(event)
-  const uid = caller.uid
+
+  const isWriteMethod =
+    rpc.method === 'CancelTask' ||
+    rpc.method === 'tasks/cancel' ||
+    rpc.method === 'message/send'
+
+  if (isWriteMethod) {
+    const config = useRuntimeConfig()
+    assertA2aWriteAllowed(caller, Boolean(config.a2aWriteEnabled))
+  }
+
+  // A2A v1.0 synchronous SendMessage (read-only study summary)
+  if (rpc.method === 'SendMessage') {
+    const parsedParams = A2aSendMessageParamsSchema.safeParse(rpc.params)
+    if (!parsedParams.success) {
+      throw createError({
+        statusCode: 400,
+        statusMessage: 'Bad Request: Invalid A2A SendMessage params.',
+      })
+    }
+
+    const rawTrackId = parsedParams.data.metadata?.trackId
+    const trackId = typeof rawTrackId === 'string' && rawTrackId.trim().length > 0
+      ? rawTrackId.trim()
+      : undefined
+
+    const snapshot = await getStudySummaryForUser(uid, { trackId })
+    return buildSendMessageSummaryResponse(rpc.id, snapshot)
+  }
 
   if (rpc.method === 'quicksheet/get') {
     const rawTab = typeof rpc.params.tab === 'string' ? rpc.params.tab : 'simulation'
@@ -147,8 +247,9 @@ export default defineEventHandler(async (event) => {
     return { jsonrpc: '2.0', id: rpc.id, result: { task } }
   }
 
-  if (rpc.method === 'tasks/cancel') {
-    const taskId = typeof rpc.params.taskId === 'string' ? rpc.params.taskId.trim() : ''
+  if (rpc.method === 'tasks/cancel' || rpc.method === 'CancelTask') {
+    const rawId = rpc.method === 'CancelTask' ? rpc.params.id : rpc.params.taskId
+    const taskId = typeof rawId === 'string' ? rawId.trim() : ''
     if (!taskId) {
       throw createError({ statusCode: 400, statusMessage: 'Bad Request: taskId is required.' })
     }
@@ -156,7 +257,7 @@ export default defineEventHandler(async (event) => {
     return { jsonrpc: '2.0', id: rpc.id, result: { task } }
   }
 
-  // method === 'message/send'
+  // Legacy method === 'message/send' (write scope + a2aWriteEnabled required)
   const rawParts = Array.isArray((rpc.params.message as Record<string, unknown> | undefined)?.parts)
     ? ((rpc.params.message as Record<string, unknown>).parts as unknown[])
     : []

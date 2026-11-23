@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import type { SsoConsumeResponse } from '../../../shared/schemas/sso'
+import { SSO_STATE_REGEX, type SsoConsumeResponse } from '~/shared/schemas/sso'
 
-const route = useRoute()
 const router = useRouter()
 const { loginWithCustomToken } = useFirebaseAuth()
 
@@ -9,17 +8,34 @@ const status = ref<'processing' | 'error'>('processing')
 const errorMessage = ref<string | null>(null)
 
 onMounted(async () => {
-  const token = typeof route.query.token === 'string' ? route.query.token.trim() : ''
-  if (!token) {
+  const rawHash = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : ''
+  const hasLegacyQueryToken = new URLSearchParams(window.location.search).has('token')
+
+  // Immediately strip sensitive fragment/query parameters from the URL bar and browser history
+  window.history.replaceState(null, '', window.location.pathname)
+
+  if (hasLegacyQueryToken && !rawHash) {
     status.value = 'error'
-    errorMessage.value = 'SSO トークンが指定されていません。'
+    errorMessage.value = '旧 SSO 形式（?token=）は終了しました。AI ROZA Hub から再度ログインしてください。'
+    return
+  }
+
+  const hashParams = new URLSearchParams(rawHash)
+  const code = hashParams.get('code')?.trim() ?? ''
+  const state = hashParams.get('state')?.trim() ?? ''
+
+  if (!code || !SSO_STATE_REGEX.test(state)) {
+    status.value = 'error'
+    errorMessage.value = 'SSO コールバックの code または state が不正です。'
     return
   }
 
   try {
     const res = await $fetch<SsoConsumeResponse>('/api/auth/sso/consume', {
       method: 'POST',
-      body: { token },
+      body: { code, state },
     })
     await loginWithCustomToken(res.customToken)
     await router.replace('/')

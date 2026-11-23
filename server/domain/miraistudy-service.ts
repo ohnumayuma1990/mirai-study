@@ -469,3 +469,67 @@ export async function getStudySimulationForUser(
     dailyMinutesOverride: options.dailyMinutesOverride,
   })
 }
+
+export interface StudySummarySnapshot {
+  tracks: StudyTrack[]
+  selectedTrack: StudyTrack | null
+  simulation: SimulationResponse
+  recentSessions: StudySession[]
+  recentExamLogs: ExamLog[]
+  dueReviewCount: number
+  activeReviewCount: number
+}
+
+export async function getStudySummaryForUser(
+  uid: string,
+  options: { trackId?: string } = {},
+): Promise<StudySummarySnapshot> {
+  const tracks = await listStudyTracks(uid)
+  const selectedTrack =
+    (options.trackId ? tracks.find((t) => t.id === options.trackId) : undefined) ??
+    tracks.find((t) => t.isDefault) ??
+    tracks[0] ??
+    null
+
+  if (!selectedTrack) {
+    const simulation = runStudySimulation({
+      track: null,
+      studySessions: [],
+      examLogs: [],
+      reviewItems: [],
+    })
+    return {
+      tracks,
+      selectedTrack: null,
+      simulation,
+      recentSessions: [],
+      recentExamLogs: [],
+      dueReviewCount: 0,
+      activeReviewCount: 0,
+    }
+  }
+
+  // Single-pass parallel fetch: each collection is queried at most once
+  const [studySessions, examLogs, reviewsResult] = await Promise.all([
+    listStudySessions(uid, { trackId: selectedTrack.id, limit: 180 }),
+    listExamLogs(uid, { trackId: selectedTrack.id, limit: 180 }),
+    listReviewItems(uid, { trackId: selectedTrack.id, status: 'active', limit: 200 }),
+  ])
+
+  const simulation = runStudySimulation({
+    track: selectedTrack,
+    studySessions,
+    examLogs,
+    reviewItems: reviewsResult.items,
+  })
+
+  return {
+    tracks,
+    selectedTrack,
+    simulation,
+    recentSessions: studySessions.slice(0, 5),
+    recentExamLogs: examLogs.slice(0, 5),
+    dueReviewCount: reviewsResult.dueCount,
+    activeReviewCount: reviewsResult.items.length,
+  }
+}
