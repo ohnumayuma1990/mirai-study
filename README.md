@@ -5,6 +5,7 @@
 ## ドキュメント
 
 - [現行実装の詳細設計書](./docs/detailed-design.md)
+- [設計とコードの読み方](./docs/code-reading-guide.md)
 - [要件定義書 & 実装計画 (`docs/implementation-plan.md`)](./docs/implementation-plan.md)
 
 ## 技術スタック

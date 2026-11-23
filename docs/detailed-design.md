@@ -2,6 +2,8 @@
 
 資格試験や技術習得のトラックごとに学習時間、模試結果、開発実績、復習項目を管理する。記録から3種類の学習ペースを試算し、復習期日と定着率への影響を表示する。AI ROZA Hub からは SSO と学習サマリー照会を利用できる。基準は [`main` の実装コミット](https://github.com/ohnumayuma1990/mirai-study/tree/23500266dd785a80e345ffd516580d69ab0a9997)。
 
+フレームワークと依存関係、機能ごとの入口・処理・用語は [設計とコードの読み方](./code-reading-guide.md) を参照。
+
 ## 1. 構成と責務
 
 | 層 | 実装と責務 |
@@ -102,7 +104,7 @@
 | POST `/api/a2a/v1` · `SendMessage` | A2A v1.0 の JSON-RPC 同期応答。ユーザー用 read Bearer でトラック・学習実績・予測・復習件数のサマリーを取得。任意の `metadata.trackId` を受け取る |
 | 同上 · `quicksheet/get`、`tasks/get` | 互換処理として詳細タブまたはドラフト状態を取得 |
 | 同上 · `message/send`、`tasks/cancel`／`CancelTask` | 互換書き込み。ドラフトを作成または取消 |
-| POST `/api/a2a/tasks/{id}/commit`、`/api/a2a/tasks/{id}/cancel` | 互換書き込みの確定・取消。確定は種別と入力に応じたドメイン保存を呼ぶ |
+| POST `/api/a2a/tasks/{id}/commit`、POST `/api/a2a/tasks/{id}/cancel` | 互換書き込みの確定・取消。確定は種別と入力に応じたドメイン保存を呼ぶ |
 
 A2A のユーザー識別には SSO と同じメールと UID の対応表を使う。互換書き込みは `NUXT_A2A_WRITE_ENABLED` と登録済みの呼び出し元が署名したトークンの write スコープを要求する。現行 Hub のカタログで公開する操作は read の同期チャットのみ。互換の確定処理は記録作成とタスクの `completed` 更新を個別に行うため、記録作成後の状態更新に失敗したときは再試行前に記録とタスクの両方を確認する必要がある。
 
