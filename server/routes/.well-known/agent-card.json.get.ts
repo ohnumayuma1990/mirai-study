@@ -2,6 +2,8 @@ import { defineEventHandler, setResponseHeader } from 'h3'
 import {
   A2A_AGENT_ID,
   A2A_EXTENSION_HITL_FORM,
+  A2A_EXTENSION_QUICKSHEET,
+  A2A_QUICKSHEET_SKILL,
   A2A_PROTOCOL_VERSION,
   A2aAgentCardSchema,
   type A2aAgentCard,
@@ -35,13 +37,21 @@ export function buildSignedAgentCard(params: {
     capabilities: {
       streaming: false,
       pushNotifications: false,
-      ...(params.studyTrackGoals ? { extensions: [{ uri: A2A_EXTENSION_STUDY_TRACK }, { uri: A2A_EXTENSION_HITL_FORM }] } : {}),
+      extensions: [
+        { uri: A2A_EXTENSION_QUICKSHEET },
+        ...(params.studyTrackGoals ? [{ uri: A2A_EXTENSION_STUDY_TRACK }, { uri: A2A_EXTENSION_HITL_FORM }] : []),
+      ],
     },
     skills: [
       {
         id: 'study_summary',
         name: '学習サマリー照会',
         description: '学習トラック・直近の学習実績・3シナリオ未来予測・要復習件数のサマリーを同期で取得',
+      },
+      {
+        id: A2A_QUICKSHEET_SKILL,
+        name: '学習詳細スナップショット取得',
+        description: '未来予測・学習セッション・演習/模試・復習キュー/開発進捗の4タブ詳細を読み取り専用で取得',
       },
       ...(params.studyTrackGoals ? [{
         id: A2A_STUDY_TRACK_SKILL,

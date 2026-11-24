@@ -7,6 +7,7 @@ export const A2A_PROTOCOL_VERSION = '1.0' as const
 export const A2A_EXTENSION_QUICKSHEET = 'urn:roza:quick-sheet:v1' as const
 export const A2A_EXTENSION_UI_CARDS = 'urn:roza:ui-cards:v1' as const
 export const A2A_EXTENSION_HITL_FORM = 'urn:roza:hitl-form:v1' as const
+export const A2A_QUICKSHEET_SKILL = 'fetch_detail_snapshot' as const
 
 export const A2aScopeSchema = z.enum(['read', 'write'])
 export type A2aScope = z.infer<typeof A2aScopeSchema>
@@ -146,3 +147,56 @@ export const A2aDraftTaskSchema = z.strictObject({
 })
 
 export type A2aDraftTask = z.infer<typeof A2aDraftTaskSchema>
+
+const quickSheetBoundedText = z.string().trim().min(1).max(1000)
+const quickSheetToneSchema = z.enum(['emerald', 'amber', 'rose', 'indigo', 'neutral'])
+const quickSheetExternalPathSchema = z.string().regex(/^\/(?!\/)[A-Za-z0-9/_-]*$/)
+
+export const A2aQuickSheetBlockSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('kpi_grid'),
+    items: z.array(z.strictObject({
+      label: quickSheetBoundedText,
+      value: quickSheetBoundedText,
+      sub: quickSheetBoundedText.optional(),
+      tone: quickSheetToneSchema.optional(),
+    })).max(20),
+  }),
+  z.strictObject({
+    kind: z.literal('mini_bars'),
+    items: z.array(z.strictObject({
+      label: quickSheetBoundedText,
+      value: z.number(),
+      unit: quickSheetBoundedText.optional(),
+    })).max(30),
+  }),
+  z.strictObject({
+    kind: z.literal('list'),
+    items: z.array(z.strictObject({
+      label: quickSheetBoundedText,
+      value: quickSheetBoundedText,
+      sub: quickSheetBoundedText.optional(),
+    })).max(30),
+  }),
+  z.strictObject({
+    kind: z.literal('notice'),
+    text: quickSheetBoundedText,
+    tone: quickSheetToneSchema,
+  }),
+])
+
+export type A2aQuickSheetBlock = z.infer<typeof A2aQuickSheetBlockSchema>
+
+export const A2aQuickSheetSnapshotSchema = z.strictObject({
+  title: quickSheetBoundedText,
+  subtitle: quickSheetBoundedText.optional(),
+  generatedAt: z.iso.datetime(),
+  tabs: z.array(z.strictObject({
+    id: quickSheetBoundedText,
+    label: quickSheetBoundedText,
+    externalPath: quickSheetExternalPathSchema,
+    blocks: z.array(A2aQuickSheetBlockSchema).max(20),
+  })).min(1).max(10),
+})
+
+export type A2aQuickSheetSnapshot = z.infer<typeof A2aQuickSheetSnapshotSchema>

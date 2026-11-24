@@ -5,10 +5,14 @@ import {
   A2A_EXTENSION_HITL_FORM,
   A2A_EXTENSION_QUICKSHEET,
   A2A_EXTENSION_UI_CARDS,
+  A2A_QUICKSHEET_SKILL,
   A2aMessagePartSchema,
+  A2aQuickSheetSnapshotSchema,
   A2aQuickSheetTabSchema,
   A2aSendMessageParamsSchema,
   type A2aRecordKind,
+  type A2aQuickSheetBlock,
+  type A2aQuickSheetSnapshot,
 } from '../../../shared/schemas/a2a'
 import {
   A2A_EXTENSION_STUDY_TRACK,
@@ -26,6 +30,7 @@ import { analyzeStudyImageWithOpenAI } from '../../utils/openai'
 import { a2aRateLimiter } from '../../utils/rate-limit'
 import { getClientIp } from '../../utils/request-ip'
 import {
+  getStudyDetailSnapshotDataForUser,
   getStudySimulationForUser,
   getStudySummaryForUser,
   listDevLogs,
@@ -33,6 +38,7 @@ import {
   listReviewItems,
   listStudySessions,
   listStudyTracks,
+  type StudyDetailSnapshotData,
   type StudySummarySnapshot,
 } from '../../domain/miraistudy-service'
 import {
@@ -128,6 +134,307 @@ export function buildSendMessageSummaryResponse(
   }
 }
 
+export function boundText(raw: string, fallback: string, maxLen = 200): string {
+  const trimmed = raw.trim()
+  if (!trimmed) return fallback
+  if (trimmed.length <= maxLen) return trimmed
+  return trimmed.slice(0, maxLen)
+}
+
+export function buildQuickSheetSnapshot(
+  data: StudyDetailSnapshotData,
+  nowIso = new Date().toISOString(),
+): A2aQuickSheetSnapshot {
+  const title = data.selectedTrack
+    ? boundText(`MiraiStudy: ${data.selectedTrack.title}`, 'MiraiStudy 学習詳細', 120)
+    : 'MiraiStudy 学習詳細'
+  const subtitle = data.selectedTrack
+    ? boundText(`目標日 ${data.selectedTrack.targetDate}・目標 ${data.selectedTrack.targetScorePct}%`, '学習状況', 120)
+    : '学習トラック未登録'
+
+  const sim = data.simulation
+
+  const simulationBlocks: A2aQuickSheetBlock[] = sim.status === 'ready'
+    ? [
+        {
+          kind: 'kpi_grid',
+          items: [
+            {
+              label: '推定得点率',
+              value: `${sim.currentEstimatedScorePct.toFixed(1)}%`,
+              sub: `合格 ${sim.passingScorePct}% / 目標 ${sim.targetScorePct}%`,
+              tone: 'indigo',
+            },
+            {
+              label: '累計学習時間',
+              value: `${sim.cumulativeStudyHours.toFixed(1)}h`,
+              sub: `目標 ${sim.targetTotalHours}h`,
+              tone: 'neutral',
+            },
+            {
+              label: '目標日まで',
+              value: `${sim.daysRemaining}日`,
+              sub: `目標日 ${sim.targetDate}`,
+              tone: sim.daysRemaining <= 14 ? 'amber' : 'neutral',
+            },
+          ],
+        },
+        {
+          kind: 'list',
+          items: [
+            {
+              label: '実績ペース予測',
+              value: `${sim.scenarios.observed_trend.projectedScoreAtTargetDate.toFixed(1)}%`,
+              sub: `直近平均 ${Math.round(sim.observedDailyMinutesAvg)}分/日`,
+            },
+            {
+              label: '目標ペース予測',
+              value: `${sim.scenarios.target_pace.projectedScoreAtTargetDate.toFixed(1)}%`,
+              sub: `目標 ${Math.round(sim.scenarios.target_pace.dailyMinutes)}分/日`,
+            },
+            {
+              label: '集中ペース予測',
+              value: `${sim.scenarios.intensive_pace.projectedScoreAtTargetDate.toFixed(1)}%`,
+              sub: `集中 ${Math.round(sim.scenarios.intensive_pace.dailyMinutes)}分/日`,
+            },
+          ],
+        },
+        ...(sim.retentionAlert.severity !== 'none'
+          ? [
+              {
+                kind: 'notice' as const,
+                text: boundText(sim.retentionAlert.message, '忘却アラートが発生しています。早めに復習を行いましょう。', 300),
+                tone: (sim.retentionAlert.severity === 'critical' ? 'rose' : 'amber') as 'rose' | 'amber',
+              },
+            ]
+          : []),
+      ]
+    : [
+        {
+          kind: 'notice',
+          text: boundText(sim.message, '学習トラックがまだ登録されていません。'),
+          tone: 'neutral',
+        },
+      ]
+
+  const studySessionsBlocks: A2aQuickSheetBlock[] = data.sessions.length > 0
+    ? [
+        {
+          kind: 'kpi_grid',
+          items: [
+            {
+              label: '記録件数',
+              value: `${data.sessions.length}件`,
+              tone: 'neutral',
+            },
+            {
+              label: '合計学習時間',
+              value: `${(data.sessions.reduce((acc, s) => acc + s.durationMinutes, 0) / 60).toFixed(1)}h`,
+              tone: 'indigo',
+            },
+            {
+              label: '平均集中度',
+              value: (data.sessions.reduce((acc, s) => acc + s.focusLevel, 0) / data.sessions.length).toFixed(1),
+              sub: '/5',
+              tone: 'emerald',
+            },
+          ],
+        },
+        {
+          kind: 'mini_bars',
+          items: data.sessions.slice(0, 10).map((s) => ({
+            label: boundText(`${s.studiedDate.slice(5)} ${s.materialOrTopic}`, s.studiedDate, 40),
+            value: s.durationMinutes,
+            unit: '分',
+          })),
+        },
+        {
+          kind: 'list',
+          items: data.sessions.slice(0, 15).map((s) => ({
+            label: boundText(s.materialOrTopic, '学習セッション', 100),
+            value: `${s.durationMinutes}分`,
+            sub: boundText(`集中度 ${s.focusLevel}/5${s.memo ? `・${s.memo}` : ''}`, `集中度 ${s.focusLevel}/5`, 120),
+          })),
+        },
+      ]
+    : [
+        {
+          kind: 'notice',
+          text: '学習セッションの記録はまだありません。',
+          tone: 'neutral',
+        },
+      ]
+
+  const examLogsBlocks: A2aQuickSheetBlock[] = data.examLogs.length > 0
+    ? [
+        {
+          kind: 'kpi_grid',
+          items: [
+            {
+              label: '演習記録件数',
+              value: `${data.examLogs.length}件`,
+              tone: 'neutral',
+            },
+            {
+              label: '最新得点率',
+              value: `${data.examLogs[0]?.scorePct.toFixed(1) ?? 0}%`,
+              tone: 'indigo',
+            },
+            {
+              label: '平均得点率',
+              value: `${(data.examLogs.reduce((acc, l) => acc + l.scorePct, 0) / data.examLogs.length).toFixed(1)}%`,
+              tone: 'emerald',
+            },
+          ],
+        },
+        {
+          kind: 'mini_bars',
+          items: data.examLogs.slice(0, 10).map((log) => ({
+            label: boundText(`${log.takenDate.slice(5)} ${log.examName}`, log.takenDate, 40),
+            value: Number(log.scorePct.toFixed(1)),
+            unit: '%',
+          })),
+        },
+        {
+          kind: 'list',
+          items: data.examLogs.slice(0, 15).map((log) => ({
+            label: boundText(`${log.takenDate} ${log.examName}`, '演習・模試', 100),
+            value: `${log.scorePct.toFixed(1)}%`,
+            sub: boundText(
+              [
+                log.correctCount !== undefined && log.totalQuestions !== undefined ? `正答 ${log.correctCount}/${log.totalQuestions}` : '',
+                log.weakTopics.length > 0 ? `弱点: ${log.weakTopics.join('・')}` : '',
+              ].filter(Boolean).join('・'),
+              '演習記録',
+              120,
+            ),
+          })),
+        },
+      ]
+    : [
+        {
+          kind: 'notice',
+          text: '演習・模試の記録はまだありません。',
+          tone: 'neutral',
+        },
+      ]
+
+  const today = todayIsoUtc()
+  const totalHandsOnMinutes = data.devLogs.reduce((acc, d) => acc + d.handsOnMinutes, 0)
+
+  const reviewsAndDevBlocks: A2aQuickSheetBlock[] = data.reviews.length > 0 || data.devLogs.length > 0
+    ? [
+        {
+          kind: 'kpi_grid',
+          items: [
+            {
+              label: '要復習カード',
+              value: `${data.dueReviewCount}件`,
+              sub: `有効 ${data.reviews.length}件`,
+              tone: data.dueReviewCount > 0 ? 'amber' : 'emerald',
+            },
+            {
+              label: '開発ログ',
+              value: `${data.devLogs.length}件`,
+              sub: `ハンズオン ${totalHandsOnMinutes}分`,
+              tone: 'indigo',
+            },
+          ],
+        },
+        ...(data.reviews.length > 0
+          ? [
+              {
+                kind: 'list' as const,
+                items: data.reviews.slice(0, 10).map((r) => ({
+                  label: boundText(r.topic, '復習カード', 80),
+                  value: r.nextReviewDate <= today ? '要復習' : r.nextReviewDate,
+                  sub: `Stage ${r.stage}`,
+                })),
+              },
+            ]
+          : []),
+        ...(data.devLogs.length > 0
+          ? [
+              {
+                kind: 'list' as const,
+                items: data.devLogs.slice(0, 10).map((d) => ({
+                  label: boundText(`${d.loggedDate} ${d.featureSummary}`, d.loggedDate, 100),
+                  value: `${d.handsOnMinutes}分`,
+                  sub: `完了タスク ${d.completedTasks}件`,
+                })),
+              },
+            ]
+          : []),
+      ]
+    : [
+        {
+          kind: 'notice',
+          text: '復習カードと開発ログはまだありません。',
+          tone: 'neutral',
+        },
+      ]
+
+  return A2aQuickSheetSnapshotSchema.parse({
+    title,
+    subtitle,
+    generatedAt: nowIso,
+    tabs: [
+      {
+        id: 'simulation',
+        label: '未来予測',
+        externalPath: '/',
+        blocks: simulationBlocks,
+      },
+      {
+        id: 'study_sessions',
+        label: '学習セッション',
+        externalPath: '/logs',
+        blocks: studySessionsBlocks,
+      },
+      {
+        id: 'exam_logs',
+        label: '演習・模試',
+        externalPath: '/logs',
+        blocks: examLogsBlocks,
+      },
+      {
+        id: 'reviews_and_dev',
+        label: '復習キュー・開発進捗',
+        externalPath: '/logs',
+        blocks: reviewsAndDevBlocks,
+      },
+    ],
+  })
+}
+
+export function buildSendMessageQuickSheetResponse(
+  rpcId: string | number,
+  data: StudyDetailSnapshotData,
+  nowIso?: string,
+) {
+  const snapshot = buildQuickSheetSnapshot(data, nowIso)
+  return {
+    jsonrpc: '2.0' as const,
+    id: rpcId,
+    result: {
+      message: {
+        role: 'ROLE_AGENT' as const,
+        messageId: randomUUID(),
+        contextId: randomUUID(),
+        parts: [
+          { text: `${snapshot.title}を取得しました。` },
+          {
+            data: {
+              extension: A2A_EXTENSION_QUICKSHEET,
+              payload: snapshot,
+            },
+          },
+        ],
+      },
+    },
+  }
+}
+
 export default defineEventHandler(async (event) => {
   setResponseHeader(event, 'Cache-Control', 'no-store')
 
@@ -198,6 +505,11 @@ export default defineEventHandler(async (event) => {
     const trackId = typeof rawTrackId === 'string' && rawTrackId.trim().length > 0
       ? rawTrackId.trim()
       : undefined
+
+    if (metadata?.skill === A2A_QUICKSHEET_SKILL) {
+      const detailData = await getStudyDetailSnapshotDataForUser(uid, { trackId })
+      return buildSendMessageQuickSheetResponse(rpc.id, detailData)
+    }
 
     const snapshot = await getStudySummaryForUser(uid, { trackId })
     return buildSendMessageSummaryResponse(rpc.id, snapshot)
