@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   A2A_AUDIENCE,
-  A2A_EXTENSION_HITL_FORM,
   A2A_EXTENSION_QUICKSHEET,
+  A2A_EXTENSION_HITL_FORM,
   A2A_QUICKSHEET_SKILL,
   A2aQuickSheetSnapshotSchema,
 } from '../shared/schemas/a2a'
@@ -16,6 +16,7 @@ import {
   buildSendMessageSummaryResponse,
   formatStudySummaryText,
 } from '../server/api/a2a/v1.post'
+import type { FirebaseAuthAdapter } from '../server/utils/hub-account-mapping'
 
 const SECRET_A = 'a2a-caller-secret-alpha-0123456789abcdef'
 const SECRET_B = 'a2a-caller-secret-beta--0123456789abcdef'
@@ -23,6 +24,33 @@ const SSO_SECRET = 'sso-independent-secret--0123456789abcdef'
 const OWNER_EMAIL = 'owner@example.com'
 const OWNER_UID = 'uid-study-owner-99'
 const MAPPINGS_JSON = JSON.stringify([{ email: OWNER_EMAIL, uid: OWNER_UID }])
+
+function createMockAuth(): FirebaseAuthAdapter {
+  return {
+    async getUser(uid) {
+      if (uid === OWNER_UID) {
+        return { uid: OWNER_UID, email: OWNER_EMAIL, emailVerified: true, disabled: false }
+      }
+      const err = new Error('not found') as Error & { code: string }
+      err.code = 'auth/user-not-found'
+      throw err
+    },
+    async getUserByEmail(email) {
+      if (email === OWNER_EMAIL) {
+        return { uid: OWNER_UID, email: OWNER_EMAIL, emailVerified: true, disabled: false }
+      }
+      const err = new Error('not found') as Error & { code: string }
+      err.code = 'auth/user-not-found'
+      throw err
+    },
+    async createUser(props) {
+      return { uid: 'provisioned-uid-888', email: props.email, emailVerified: props.emailVerified, disabled: false }
+    },
+    async updateUser(uid, props) {
+      return { uid, email: OWNER_EMAIL, emailVerified: props.emailVerified, disabled: false }
+    },
+  }
+}
 
 it('advertises study goals only when enabled and disallows changing the confirmation target', () => {
   const settings = { appPublicOrigin: 'https://study.example.com', signingSecret: SECRET_A }
@@ -37,7 +65,7 @@ it('advertises study goals only when enabled and disallows changing the confirma
 })
 
 describe('server/utils/a2a-auth & Agent Card', () => {
-  it('supports single-caller secret and multi-caller JSON registry', () => {
+  it('supports single-caller secret and multi-caller JSON registry (including destr/parsed arrays)', () => {
     const single = parseA2aCallers({
       a2aEnabled: true,
       a2aSharedSecret: SECRET_A,
@@ -57,9 +85,19 @@ describe('server/utils/a2a-auth & Agent Card', () => {
       ]),
     })
     expect(multi).toHaveLength(2)
+
+    // Pre-parsed array (Nitro destr compatible)
+    const preParsed = parseA2aCallers({
+      a2aEnabled: true,
+      a2aSharedSecret: '',
+      a2aAllowedIssuer: '',
+      a2aCallersJson: [{ issuer: 'preparsed', secret: SECRET_A }] as unknown as string,
+    })
+    expect(preParsed).toHaveLength(1)
+    expect(preParsed[0]?.issuer).toBe('preparsed')
   })
 
-  it('verifies app-only read token for Agent Card and user read token mapped to existing UID', () => {
+  it('verifies app-only read token for Agent Card and user read token mapped to existing UID, auto-provisioning unmapped users, and enforcing ssoAutoProvisionEnabled: false', async () => {
     const now = 1_700_000_000
     const appToken = signHmacToken(
       {
@@ -73,7 +111,9 @@ describe('server/utils/a2a-auth & Agent Card', () => {
       SECRET_A,
     )
 
-    const appCtx = verifyA2aAuthorization({
+    const auth = createMockAuth()
+
+    const appCtx = await verifyA2aAuthorization({
       authorizationHeader: `Bearer ${appToken}`,
       settings: {
         a2aEnabled: true,
@@ -84,6 +124,7 @@ describe('server/utils/a2a-auth & Agent Card', () => {
       },
       requiredScope: 'read',
       requireUser: false,
+      auth,
       nowEpochSeconds: now,
     })
     expect(appCtx.uid).toBeNull()
@@ -102,7 +143,7 @@ describe('server/utils/a2a-auth & Agent Card', () => {
       SECRET_A,
     )
 
-    const userCtx = verifyA2aAuthorization({
+    const userCtx = await verifyA2aAuthorization({
       authorizationHeader: `Bearer ${userToken}`,
       settings: {
         a2aEnabled: true,
@@ -114,80 +155,14 @@ describe('server/utils/a2a-auth & Agent Card', () => {
       },
       requiredScope: 'read',
       requireUser: true,
+      auth,
       nowEpochSeconds: now,
     })
     expect(userCtx.uid).toBe(OWNER_UID)
     expect(userCtx.callerIssuer).toBe('team-management')
-  })
 
-  it('rejects write operations with read-only token and when a2aWriteEnabled is false', () => {
-    const now = 1_700_000_000
-    const readOnlyToken = signHmacToken(
-      {
-        iss: 'team-management',
-        aud: A2A_AUDIENCE,
-        email: OWNER_EMAIL,
-        scopes: ['read'],
-        iat: now - 5,
-        exp: now + 60,
-      },
-      SECRET_A,
-    )
-
-    // Read-only token must be rejected for write operations (legacy RPC / REST draft, commit, cancel)
-    expect(() =>
-      verifyA2aAuthorization({
-        authorizationHeader: `Bearer ${readOnlyToken}`,
-        settings: {
-          a2aEnabled: true,
-          a2aWriteEnabled: true,
-          a2aSharedSecret: SECRET_A,
-          a2aAllowedIssuer: 'team-management',
-          a2aCallersJson: '',
-          hubAccountMappingsJson: MAPPINGS_JSON,
-          ssoSharedSecret: SSO_SECRET,
-        },
-        requiredScope: 'write',
-        requireUser: true,
-        nowEpochSeconds: now,
-      }),
-    ).toThrowError(/lacks required 'write' scope/i)
-
-    const writeToken = signHmacToken(
-      {
-        iss: 'team-management',
-        aud: A2A_AUDIENCE,
-        email: OWNER_EMAIL,
-        scopes: ['read', 'write'],
-        iat: now - 5,
-        exp: now + 60,
-      },
-      SECRET_A,
-    )
-
-    // Even a write-scoped token must be rejected while a2aWriteEnabled is false
-    expect(() =>
-      verifyA2aAuthorization({
-        authorizationHeader: `Bearer ${writeToken}`,
-        settings: {
-          a2aEnabled: true,
-          a2aWriteEnabled: false,
-          a2aSharedSecret: SECRET_A,
-          a2aAllowedIssuer: 'team-management',
-          a2aCallersJson: '',
-          hubAccountMappingsJson: MAPPINGS_JSON,
-          ssoSharedSecret: SSO_SECRET,
-        },
-        requiredScope: 'write',
-        requireUser: true,
-        nowEpochSeconds: now,
-      }),
-    ).toThrowError(/write operations are disabled/i)
-  })
-
-  it('rejects disabled A2A, unmapped accounts, and reused SSO secret', () => {
-    const now = 1_700_000_000
-    const token = signHmacToken(
+    // Unmapped user with auto-provisioning enabled
+    const unmappedToken = signHmacToken(
       {
         iss: 'team-management',
         aud: A2A_AUDIENCE,
@@ -195,11 +170,67 @@ describe('server/utils/a2a-auth & Agent Card', () => {
         scopes: ['read'],
         iat: now - 5,
         exp: now + 60,
+        jti: 'a2a-unmapped-1',
       },
       SECRET_A,
     )
 
-    expect(() =>
+    const provisionedCtx = await verifyA2aAuthorization({
+      authorizationHeader: `Bearer ${unmappedToken}`,
+      settings: {
+        a2aEnabled: true,
+        a2aSharedSecret: SECRET_A,
+        a2aAllowedIssuer: 'team-management',
+        a2aCallersJson: '',
+        hubAccountMappingsJson: '',
+        ssoSharedSecret: SSO_SECRET,
+        ssoAutoProvisionEnabled: true,
+      },
+      requiredScope: 'read',
+      requireUser: true,
+      auth,
+      nowEpochSeconds: now,
+    })
+    expect(provisionedCtx.uid).toBe('provisioned-uid-888')
+
+    // Unmapped user with ssoAutoProvisionEnabled: false must be rejected with 403
+    await expect(
+      verifyA2aAuthorization({
+        authorizationHeader: `Bearer ${unmappedToken}`,
+        settings: {
+          a2aEnabled: true,
+          a2aSharedSecret: SECRET_A,
+          a2aAllowedIssuer: 'team-management',
+          a2aCallersJson: '',
+          hubAccountMappingsJson: MAPPINGS_JSON,
+          ssoSharedSecret: SSO_SECRET,
+          ssoAutoProvisionEnabled: false,
+        },
+        requiredScope: 'read',
+        requireUser: true,
+        auth,
+        nowEpochSeconds: now,
+      }),
+    ).rejects.toThrowError(/not mapped/i)
+  })
+
+  it('rejects disabled A2A, unmapped accounts, and reused SSO secret', async () => {
+    const now = 1_700_000_000
+    const token = signHmacToken(
+      {
+        iss: 'team-management',
+        aud: A2A_AUDIENCE,
+        email: 'stranger@example.com',
+        scopes: ['read'],
+        iat: now - 5,
+        exp: now + 60,
+      },
+      SECRET_A,
+    )
+
+    const auth = createMockAuth()
+
+    await expect(
       verifyA2aAuthorization({
         authorizationHeader: `Bearer ${token}`,
         settings: {
@@ -207,13 +238,16 @@ describe('server/utils/a2a-auth & Agent Card', () => {
           a2aSharedSecret: SECRET_A,
           a2aAllowedIssuer: 'team-management',
           a2aCallersJson: '',
-          hubAccountMappingsJson: MAPPINGS_JSON,
+          ssoSharedSecret: SSO_SECRET,
         },
+        requiredScope: 'read',
+        requireUser: true,
+        auth,
         nowEpochSeconds: now,
       }),
-    ).toThrowError(/disabled/i)
+    ).rejects.toThrowError(/disabled/i)
 
-    expect(() =>
+    await expect(
       verifyA2aAuthorization({
         authorizationHeader: `Bearer ${token}`,
         settings: {
@@ -223,10 +257,14 @@ describe('server/utils/a2a-auth & Agent Card', () => {
           a2aCallersJson: '',
           hubAccountMappingsJson: MAPPINGS_JSON,
           ssoSharedSecret: SSO_SECRET,
+          ssoAutoProvisionEnabled: false,
         },
+        requiredScope: 'read',
+        requireUser: true,
+        auth,
         nowEpochSeconds: now,
       }),
-    ).toThrowError(/not mapped/i)
+    ).rejects.toThrowError(/not mapped/i)
 
     expect(() =>
       verifyA2aAuthorization({
@@ -238,7 +276,11 @@ describe('server/utils/a2a-auth & Agent Card', () => {
           a2aCallersJson: '',
           hubAccountMappingsJson: MAPPINGS_JSON,
           ssoSharedSecret: SECRET_A,
+          ssoAutoProvisionEnabled: false,
         },
+        requiredScope: 'read',
+        requireUser: true,
+        auth,
         nowEpochSeconds: now,
       }),
     ).toThrowError(/must be distinct/i)

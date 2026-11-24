@@ -1,6 +1,7 @@
 import { createError, getHeader, type H3Event } from 'h3'
 import { SSO_FRESHNESS_MAX_SECONDS } from '../../shared/schemas/sso'
 import { getAdminAuth } from './firebase-admin'
+import { parseBooleanRuntimeFlag } from './runtime-config'
 
 export interface AuthenticatedUser {
   uid: string
@@ -95,7 +96,7 @@ export async function verifyBearerTokenWithVerifier(params: {
 
 export async function requireAuthUser(event: H3Event): Promise<AuthenticatedUser> {
   const config = useRuntimeConfig()
-  const ssoEnabled = Boolean(config.ssoEnabled)
+  const ssoEnabled = parseBooleanRuntimeFlag(config.ssoEnabled, false)
   const authHeader = getHeader(event, 'authorization')
   const auth = getAdminAuth()
 

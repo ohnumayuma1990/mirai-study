@@ -12,15 +12,10 @@ import {
   type SsoConsumeResponse,
 } from '../../../../shared/schemas/sso'
 import { getAdminAuth } from '../../../utils/firebase-admin'
+import { parseBooleanRuntimeFlag } from '../../../utils/runtime-config'
 import { ssoRateLimiter } from '../../../utils/rate-limit'
 import { getClientIp } from '../../../utils/request-ip'
 import { verifyAndConsumeSsoCode } from '../../../utils/sso'
-
-function isFirebaseAuthUserNotFound(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false
-  const code = (err as { code?: unknown }).code
-  return code === 'auth/user-not-found'
-}
 
 export default defineEventHandler(async (event): Promise<SsoConsumeResponse> => {
   const ip = getClientIp(event)
@@ -52,38 +47,16 @@ export default defineEventHandler(async (event): Promise<SsoConsumeResponse> => 
     code: parsed.data.code,
     state: parsed.data.state,
     cookieState,
-    ssoEnabled: Boolean(config.ssoEnabled),
+    ssoEnabled: parseBooleanRuntimeFlag(config.ssoEnabled, false),
+    ssoAutoProvisionEnabled: parseBooleanRuntimeFlag(config.ssoAutoProvisionEnabled, true),
     ssoSharedSecret: String(config.ssoSharedSecret ?? ''),
     ssoAllowedIssuer: String(config.ssoAllowedIssuer ?? 'team-management'),
-    hubAccountMappingsJson: String(config.hubAccountMappingsJson ?? ''),
+    hubAccountMappingsJson: config.hubAccountMappingsJson,
     a2aSharedSecret: String(config.a2aSharedSecret ?? ''),
-    a2aCallersJson: String(config.a2aCallersJson ?? ''),
+    a2aCallersJson: config.a2aCallersJson,
   })
 
   const auth = getAdminAuth()
-
-  let userRecord
-  try {
-    userRecord = await auth.getUser(verified.uid)
-  } catch (err) {
-    if (isFirebaseAuthUserNotFound(err)) {
-      throw createError({
-        statusCode: 403,
-        statusMessage: 'Forbidden: Mapped MiraiStudy account does not exist.',
-      })
-    }
-    throw createError({
-      statusCode: 503,
-      statusMessage: 'Service Unavailable: Failed to verify MiraiStudy account status.',
-    })
-  }
-
-  if (userRecord.disabled) {
-    throw createError({
-      statusCode: 403,
-      statusMessage: 'Forbidden: Mapped MiraiStudy account is disabled.',
-    })
-  }
 
   let customToken: string
   try {

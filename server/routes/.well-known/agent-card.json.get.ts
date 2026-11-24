@@ -10,6 +10,7 @@ import {
 } from '../../../shared/schemas/a2a'
 import { A2A_EXTENSION_STUDY_TRACK, A2A_STUDY_TRACK_SKILL } from '../../../shared/schemas/study-track-goal'
 import { requireA2aCaller } from '../../utils/a2a-auth'
+import { parseBooleanRuntimeFlag } from '../../utils/runtime-config'
 import { a2aRateLimiter } from '../../utils/rate-limit'
 import { getClientIp } from '../../utils/request-ip'
 import { signAgentPayload } from '../../utils/signed-token'
@@ -66,11 +67,11 @@ export function buildSignedAgentCard(params: {
   return { card, rawBody, signature }
 }
 
-export default defineEventHandler((event) => {
+export default defineEventHandler(async (event) => {
   const ip = getClientIp(event)
   a2aRateLimiter.assertAllowed(`a2a:ip:${ip}`)
 
-  const caller = requireA2aCaller(event, {
+  const caller = await requireA2aCaller(event, {
     requiredScope: 'read',
     requireUser: false,
   })
@@ -79,7 +80,7 @@ export default defineEventHandler((event) => {
   const { rawBody, signature } = buildSignedAgentCard({
     appPublicOrigin: String(config.appPublicOrigin ?? ''),
     signingSecret: caller.callerSecret,
-    studyTrackGoals: config.a2aStudyTrackEnabled === true && Boolean(String(config.openaiApiKey ?? '').trim()),
+    studyTrackGoals: parseBooleanRuntimeFlag(config.a2aStudyTrackEnabled, false) && Boolean(String(config.openaiApiKey ?? '').trim()),
   })
 
   setResponseHeader(event, 'Content-Type', 'application/json; charset=utf-8')

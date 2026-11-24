@@ -40,6 +40,7 @@ export default defineNuxtConfig({
     appPublicOrigin: '',
     hubAccountMappingsJson: '',
     ssoEnabled: false,
+    ssoAutoProvisionEnabled: true,
     ssoProviderOrigin: '',
     ssoAllowedIssuer: 'team-management',
     ssoSharedSecret: '',

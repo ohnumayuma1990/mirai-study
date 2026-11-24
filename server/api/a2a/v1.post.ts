@@ -442,7 +442,7 @@ export default defineEventHandler(async (event) => {
   a2aRateLimiter.assertAllowed(`a2a:ip:${ip}`)
 
   // Authenticate caller and verify a2aEnabled BEFORE buffering/parsing request body (up to 6MB)
-  const caller = requireA2aCaller(event, {
+  const caller = await requireA2aCaller(event, {
     requiredScope: 'read',
     requireUser: true,
   })
