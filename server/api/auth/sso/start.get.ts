@@ -1,6 +1,7 @@
 import { createError, defineEventHandler, sendRedirect, setCookie, setResponseHeader } from 'h3'
 import { SSO_STATE_COOKIE_NAME, SSO_STATE_TTL_SECONDS } from '../../../../shared/schemas/sso'
 import { A2A_AGENT_ID } from '../../../../shared/schemas/a2a'
+import { parseBooleanRuntimeFlag } from '../../../utils/runtime-config'
 import { ssoRateLimiter } from '../../../utils/rate-limit'
 import { getClientIp } from '../../../utils/request-ip'
 import { generateSsoState, validateStrictOrigin } from '../../../utils/sso'
@@ -13,7 +14,7 @@ export default defineEventHandler((event) => {
   setResponseHeader(event, 'Referrer-Policy', 'no-referrer')
 
   const config = useRuntimeConfig()
-  if (!config.ssoEnabled) {
+  if (!parseBooleanRuntimeFlag(config.ssoEnabled, false)) {
     throw createError({
       statusCode: 403,
       statusMessage: 'Forbidden: SSO is disabled.',

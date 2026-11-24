@@ -1,7 +1,8 @@
 import { createError, getHeader, type H3Event } from 'h3'
 import { A2A_AUDIENCE, A2aScopeSchema, type A2aScope } from '../../shared/schemas/a2a'
 import { extractBearerToken } from './auth'
-import { resolveMappedFirebaseUid } from './hub-account-mapping'
+import { resolveHubFirebaseUser, type FirebaseAuthAdapter } from './hub-account-mapping'
+import { parseBooleanRuntimeFlag, parseRuntimeJsonConfig } from './runtime-config'
 import { verifyHmacToken, type SignedTokenPayload } from './signed-token'
 import { assertSsoAndA2aSecretsDistinct } from './sso'
 
@@ -24,9 +25,10 @@ export interface A2aRuntimeSettings {
   a2aWriteEnabled?: boolean
   a2aSharedSecret: string
   a2aAllowedIssuer: string
-  a2aCallersJson: string
-  hubAccountMappingsJson?: string
+  a2aCallersJson: unknown
+  hubAccountMappingsJson?: unknown
   ssoSharedSecret?: string
+  ssoAutoProvisionEnabled?: boolean
 }
 
 export interface VerifyA2aOptions {
@@ -34,22 +36,13 @@ export interface VerifyA2aOptions {
   settings: A2aRuntimeSettings
   requiredScope?: A2aScope
   requireUser?: boolean
+  auth?: FirebaseAuthAdapter
   nowEpochSeconds?: number
 }
 
 export function parseA2aCallers(settings: A2aRuntimeSettings): A2aCallerConfig[] {
-  const trimmedJson = settings.a2aCallersJson.trim()
-  if (trimmedJson.length > 0) {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(trimmedJson)
-    } catch {
-      throw createError({
-        statusCode: 503,
-        statusMessage: 'Service Unavailable: NUXT_A2A_CALLERS_JSON is malformed.',
-      })
-    }
-
+  const parsed = parseRuntimeJsonConfig(settings.a2aCallersJson, 'NUXT_A2A_CALLERS_JSON')
+  if (parsed !== null) {
     if (!Array.isArray(parsed)) {
       throw createError({
         statusCode: 503,
@@ -121,7 +114,7 @@ function parseTokenScopes(rawScopes: unknown): A2aScope[] {
   return scopes
 }
 
-export function verifyA2aAuthorization(params: VerifyA2aOptions): A2aAuthContext {
+export async function verifyA2aAuthorization(params: VerifyA2aOptions): Promise<A2aAuthContext> {
   if (!params.settings.a2aEnabled) {
     throw createError({
       statusCode: 404,
@@ -199,17 +192,20 @@ export function verifyA2aAuthorization(params: VerifyA2aOptions): A2aAuthContext
     }
   }
 
-  const mapped = resolveMappedFirebaseUid(
-    verifiedPayload.email,
-    params.settings.hubAccountMappingsJson ?? '',
-  )
+  const autoProvisionEnabled = params.settings.ssoAutoProvisionEnabled ?? true
+  const resolved = await resolveHubFirebaseUser({
+    rawEmail: verifiedPayload.email,
+    rawMappingsJson: params.settings.hubAccountMappingsJson,
+    autoProvisionEnabled,
+    auth: params.auth,
+  })
 
   return {
     callerIssuer: matchedCaller.issuer,
     callerSecret: matchedCaller.secret,
     scopes,
-    uid: mapped.uid,
-    email: mapped.email,
+    uid: resolved.uid,
+    email: resolved.email,
     payload: verifiedPayload,
   }
 }
@@ -232,22 +228,23 @@ export function assertA2aWriteAllowed(
   }
 }
 
-export function requireA2aCaller(
+export async function requireA2aCaller(
   event: H3Event,
   options: { requiredScope?: A2aScope; requireUser?: boolean } = {},
-): A2aAuthContext {
+): Promise<A2aAuthContext> {
   const config = useRuntimeConfig()
   const settings: A2aRuntimeSettings = {
-    a2aEnabled: Boolean(config.a2aEnabled),
-    a2aWriteEnabled: Boolean(config.a2aWriteEnabled),
+    a2aEnabled: parseBooleanRuntimeFlag(config.a2aEnabled, false),
+    a2aWriteEnabled: parseBooleanRuntimeFlag(config.a2aWriteEnabled, false),
     a2aSharedSecret: String(config.a2aSharedSecret ?? ''),
     a2aAllowedIssuer: String(config.a2aAllowedIssuer ?? 'team-management'),
-    a2aCallersJson: String(config.a2aCallersJson ?? ''),
-    hubAccountMappingsJson: String(config.hubAccountMappingsJson ?? ''),
+    a2aCallersJson: config.a2aCallersJson,
+    hubAccountMappingsJson: config.hubAccountMappingsJson,
     ssoSharedSecret: String(config.ssoSharedSecret ?? ''),
+    ssoAutoProvisionEnabled: parseBooleanRuntimeFlag(config.ssoAutoProvisionEnabled, true),
   }
 
-  return verifyA2aAuthorization({
+  return await verifyA2aAuthorization({
     authorizationHeader: getHeader(event, 'authorization'),
     settings,
     requiredScope: options.requiredScope,

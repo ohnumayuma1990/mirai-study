@@ -10,7 +10,7 @@ export default defineEventHandler(async (event) => {
   const ip = getClientIp(event)
   a2aRateLimiter.assertAllowed(`a2a:ip:${ip}`)
 
-  const caller = requireA2aCaller(event, {
+  const caller = await requireA2aCaller(event, {
     requiredScope: 'write',
     requireUser: true,
   })

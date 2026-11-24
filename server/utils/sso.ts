@@ -3,7 +3,13 @@ import { Timestamp } from 'firebase-admin/firestore'
 import { createError } from 'h3'
 import { SSO_AUDIENCE, SSO_STATE_REGEX } from '../../shared/schemas/sso'
 import { getAdminFirestore } from './firebase-admin'
-import { resolveMappedFirebaseUid } from './hub-account-mapping'
+import {
+  validateAndNormalizeHubEmail,
+  parseHubAccountMappings,
+  resolveHubFirebaseUser,
+  type FirebaseAuthAdapter,
+} from './hub-account-mapping'
+import { parseRuntimeJsonConfig } from './runtime-config'
 import {
   timingSafeStringEqual,
   verifyHmacToken,
@@ -114,7 +120,7 @@ export function validateStrictOrigin(
 
 export function extractConfiguredA2aSecrets(
   a2aSharedSecret: string,
-  a2aCallersJson: string,
+  a2aCallersJson: unknown,
 ): string[] {
   const secrets: string[] = []
   const trimmedSingle = a2aSharedSecret.trim()
@@ -122,22 +128,15 @@ export function extractConfiguredA2aSecrets(
     secrets.push(trimmedSingle)
   }
 
-  const trimmedJson = a2aCallersJson.trim()
-  if (trimmedJson.length > 0) {
-    try {
-      const parsed: unknown = JSON.parse(trimmedJson)
-      if (Array.isArray(parsed)) {
-        for (const item of parsed) {
-          if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).secret === 'string') {
-            const secret = ((item as Record<string, unknown>).secret as string).trim()
-            if (secret.length > 0) {
-              secrets.push(secret)
-            }
-          }
+  const parsed = parseRuntimeJsonConfig(a2aCallersJson, 'NUXT_A2A_CALLERS_JSON')
+  if (parsed !== null && Array.isArray(parsed)) {
+    for (const item of parsed) {
+      if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).secret === 'string') {
+        const secret = ((item as Record<string, unknown>).secret as string).trim()
+        if (secret.length > 0) {
+          secrets.push(secret)
         }
       }
-    } catch {
-      // Malformed a2aCallersJson is handled by parseA2aCallers when A2A is invoked
     }
   }
 
@@ -147,7 +146,7 @@ export function extractConfiguredA2aSecrets(
 export function assertSsoAndA2aSecretsDistinct(
   ssoSharedSecret: string,
   a2aSharedSecret: string,
-  a2aCallersJson: string,
+  a2aCallersJson: unknown,
 ): void {
   const trimmedSso = ssoSharedSecret.trim()
   if (!trimmedSso) return
@@ -170,9 +169,11 @@ export interface VerifySsoCodeOptions {
   ssoEnabled: boolean
   ssoSharedSecret: string
   ssoAllowedIssuer: string
-  hubAccountMappingsJson: string
+  hubAccountMappingsJson: unknown
   a2aSharedSecret?: string
-  a2aCallersJson?: string
+  a2aCallersJson?: unknown
+  ssoAutoProvisionEnabled?: boolean
+  auth?: FirebaseAuthAdapter
   nowEpochSeconds?: number
   jtiStore?: SsoJtiStore
 }
@@ -264,16 +265,34 @@ export async function verifyAndConsumeSsoCode(options: VerifySsoCodeOptions): Pr
     })
   }
 
-  // Resolve Hub account mapping BEFORE touching Firestore to prevent unmapped write amplification
-  const mapped = resolveMappedFirebaseUid(payload.email, options.hubAccountMappingsJson)
+  const autoProvisionEnabled = options.ssoAutoProvisionEnabled ?? true
 
-  // Atomic single-use jti consumption (Firestore create() in production; no in-memory fallback)
+  // Pure in-memory validation of email and mappings BEFORE store.consumeOnce
+  const email = validateAndNormalizeHubEmail(payload.email)
+  const mappings = parseHubAccountMappings(options.hubAccountMappingsJson, { allowEmpty: autoProvisionEnabled })
+  if (!autoProvisionEnabled && !mappings.has(email)) {
+    throw createError({
+      statusCode: 403,
+      statusMessage: 'Forbidden: Hub account is not mapped to a MiraiStudy user.',
+    })
+  }
+
+  // Atomic single-use jti consumption BEFORE Firebase Auth calls
   const store = options.jtiStore ?? firestoreSsoJtiStore
   await store.consumeOnce(payload.jti.trim(), payload.exp, now)
 
+  // Resolve or provision Firebase user AFTER store.consumeOnce
+  const resolved = await resolveHubFirebaseUser({
+    rawEmail: email,
+    rawMappingsJson: options.hubAccountMappingsJson,
+    autoProvisionEnabled,
+    auth: options.auth,
+    parsedMappings: mappings,
+  })
+
   return {
-    uid: mapped.uid,
-    email: mapped.email,
+    uid: resolved.uid,
+    email: resolved.email,
     ssoAt: now,
     payload,
   }
