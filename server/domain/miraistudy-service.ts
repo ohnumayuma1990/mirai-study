@@ -551,3 +551,69 @@ export async function getStudySummaryForUser(
     activeReviewCount: reviewsResult.items.length,
   }
 }
+
+export interface StudyDetailSnapshotData {
+  tracks: StudyTrack[]
+  selectedTrack: StudyTrack | null
+  simulation: SimulationResponse
+  sessions: StudySession[]
+  examLogs: ExamLog[]
+  reviews: ReviewItem[]
+  dueReviewCount: number
+  devLogs: DevLog[]
+}
+
+export async function getStudyDetailSnapshotDataForUser(
+  uid: string,
+  options: { trackId?: string } = {},
+): Promise<StudyDetailSnapshotData> {
+  const tracks = await listStudyTracks(uid)
+  const selectedTrack =
+    (options.trackId ? tracks.find((t) => t.id === options.trackId) : undefined) ??
+    tracks.find((t) => t.isDefault) ??
+    tracks[0] ??
+    null
+
+  if (!selectedTrack) {
+    return {
+      tracks,
+      selectedTrack: null,
+      simulation: runStudySimulation({
+        track: null,
+        studySessions: [],
+        examLogs: [],
+        reviewItems: [],
+      }),
+      sessions: [],
+      examLogs: [],
+      reviews: [],
+      dueReviewCount: 0,
+      devLogs: [],
+    }
+  }
+
+  const [sessions, examLogs, reviewsResult, devLogs] = await Promise.all([
+    listStudySessions(uid, { trackId: selectedTrack.id, limit: 180 }),
+    listExamLogs(uid, { trackId: selectedTrack.id, limit: 180 }),
+    listReviewItems(uid, { trackId: selectedTrack.id, status: 'active', limit: 200 }),
+    listDevLogs(uid, { trackId: selectedTrack.id, limit: 30 }),
+  ])
+
+  const simulation = runStudySimulation({
+    track: selectedTrack,
+    studySessions: sessions,
+    examLogs,
+    reviewItems: reviewsResult.items,
+  })
+
+  return {
+    tracks,
+    selectedTrack,
+    simulation,
+    sessions,
+    examLogs,
+    reviews: reviewsResult.items,
+    dueReviewCount: reviewsResult.dueCount,
+    devLogs,
+  }
+}
